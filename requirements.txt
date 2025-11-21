@@ -5,6 +5,8 @@ matplotlib
 pandas
 scikit-learn
 xgboost
+seaborn
+openpyxl
 
 # Quantum computing packages
 merlinquantum
