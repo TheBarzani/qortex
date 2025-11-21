@@ -224,7 +224,7 @@ def normalize_features(df, cols):
     return df
 
 if __name__ == "__main__":
-    data_path = "../data/Track2_QML/train.xlsx"
+    data_path = "data/Track2_QML/train.xlsx"
     df = load_swaptions_data(data_path)
     # print(df.head())
 
