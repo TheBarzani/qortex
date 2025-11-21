@@ -4,7 +4,6 @@ torch
 matplotlib
 pandas
 scikit-learn
-xgboost
 seaborn
 openpyxl
 
@@ -13,8 +12,10 @@ merlinquantum
 perceval-quandela
 qiskit
 qiskit-aer
+qiskit-ibm-runtime
 
 # Jupyter support
 jupyter
 ipykernel
 notebook
+pylatexenc
