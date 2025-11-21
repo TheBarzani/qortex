@@ -300,7 +300,7 @@ if __name__ == "__main__":
     print(df_features.shape, "features shape")
     # Optionally, create lagged features if desired:
     lag_input_cols = df_features.columns.to_list()[1:225] #only the tenor and maturity columns
-    df_features_lagged = create_lagged_features(df_features, lag_input_cols, lags=[1, 3, 5, 7])
+    df_features_lagged = create_lagged_features(df_features, lag_input_cols, lags=[1, 2])
     # Make a new copy containing the enhanced dataset with features
 
     df_all_features = pd.concat([df_features, df_features_lagged], axis=1)
@@ -317,13 +317,13 @@ if __name__ == "__main__":
 
 
     # # #NORMALIZATION
-    # df_normalized = normalize_features(df_all_features, ["day_of_week", "month", "quarter"])
-    # print(df_normalized.shape, "normalized shape")
-    # print(df_normalized[["day_of_week", "month", "quarter"]].head(1))
+    df_normalized = normalize_features(df_all_features, ["day_of_week", "month", "quarter"])
+    print(df_normalized.shape, "normalized shape")
+    print(df_normalized[["day_of_week", "month", "quarter"]].head(1))
 
-    # # print("null check", any(df_normalized.isnull().sum()), df_normalized.shape)
-    # df_normalized = df_normalized.dropna()
-    # print("null check after dropna", any(df_normalized.isnull().sum()), df_normalized.shape)
+    # print("null check", any(df_normalized.isnull().sum()), df_normalized.shape)
+    df_normalized = df_normalized.dropna()
+    print("null check after dropna", any(df_normalized.isnull().sum()), df_normalized.shape)
 
-    # df_normalized.to_csv(str(data_dir_path + "df_normalized_lags4.csv"), index=False)
-    # print(f"Saved normalized data to {data_dir_path + 'df_normalized_lags4.csv'}")
+    df_normalized.to_csv(str(data_dir_path + "df_normalized_lags2_from_pacf.csv"), index=False)
+    print(f"Saved normalized data to {data_dir_path + 'df_normalized_lags2_from_pacf.csv'}")
