@@ -284,7 +284,10 @@ def normalize_features(df, cols):
     df[cols] = scaler.fit_transform(df[cols])
     return df
 
-if __name__ == "__main__":
+def prepare_dataset_data_for_forecasting():
+    """
+    Prepare dataset data for forecasting.
+    """
     data_dir_path = "../data/Track2_QML/"
     data_file_name = "train.xlsx"
     data_path = os.path.join(data_dir_path, data_file_name)
@@ -327,3 +330,7 @@ if __name__ == "__main__":
 
     df_normalized.to_csv(str(data_dir_path + "df_normalized_lags2_from_pacf.csv"), index=False)
     print(f"Saved normalized data to {data_dir_path + 'df_normalized_lags2_from_pacf.csv'}")
+
+if __name__ == "__main__":
+
+    prepare_dataset_data_for_forecasting()
