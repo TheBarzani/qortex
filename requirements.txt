@@ -4,6 +4,8 @@ torch
 matplotlib
 pandas
 scikit-learn
+seaborn
+openpyxl
 
 # Quantum computing packages
 merlinquantum
