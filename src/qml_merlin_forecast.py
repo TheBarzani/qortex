@@ -1,18 +1,5 @@
-"""
-Hybrid Quantum–Classical forecast using Quandela MerLin.
-
-- Uses a QuantumLayer as a nonlinear feature extractor on a subset of
-  the swaption surface (first n_q_features columns).
-- A small classical MLP head maps quantum + classical features to the
-  full next-day surface (224 vols).
-- Trains 1-step-ahead prediction and reports RMSE / MAE / R2.
-- Also generates a 14-day autoregressive forecast from the last
-  available date and saves it to CSV.
-"""
-
-from __future__ import annotations
-
-from pathlib import Path
+import os
+import math
 from datetime import timedelta
 
 import numpy as np
@@ -21,304 +8,345 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
-# MerLin / Quandela
-try:
-    from merlin import QuantumLayer, MeasurementStrategy
-    from merlin.builder import CircuitBuilder
-except ImportError as e:
-    raise SystemExit(
-        "MerLin is not installed. Please install it first, e.g.:\n"
-        "  pip install quandela-merlin perceval-quandela\n\n"
-        f"Original error: {e}"
-    )
+from merlin import QuantumLayer, MeasurementStrategy
+from merlin.builder import CircuitBuilder
 
-# Our own utilities
-from data_loading import load_swaptions_data, prepare_dataset_data, get_feature_columns
+# -------------------------
+# Config
+# -------------------------
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "..", "data", "Track2_QML")
 
-# ---------------------------------------------------------------------------
-# Model definition
-# ---------------------------------------------------------------------------
+NORMALIZED_FEATURES_PATH = os.path.join(
+    DATA_DIR, "df_normalized_lags2_from_pacf.csv"
+)
+RAW_TRAIN_PATH = os.path.join(DATA_DIR, "train.xlsx")
 
-class QuantumHybridForecast(nn.Module):
-    """
-    Hybrid model:
-      - QuantumLayer on a subset of features (angle encoding)
-      - Concatenate quantum features with full classical features
-      - Classical MLP head to predict full next-day surface
-    """
+FORECAST_HORIZON_DAYS = 14
+TEST_SIZE = 0.2
+SEED = 42
 
-    def __init__(
-        self,
-        n_features: int,
-        target_dim: int,
-        n_q_features: int = 6,
-        latent_n_photons: int = 3,
-        hidden_sizes: tuple[int, ...] = (256, 256),
-    ):
-        super().__init__()
-        assert n_q_features <= n_features, "n_q_features cannot exceed total feature count"
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.n_features = n_features
-        self.target_dim = target_dim
-        self.n_q_features = n_q_features
-
-        # Build quantum circuit
-        builder = CircuitBuilder(n_modes=n_q_features)
-        builder.add_entangling_layer(trainable=True, name="U1")
-        builder.add_angle_encoding(
-            modes=list(range(n_q_features)),  # first n_q_features classical inputs
-            name="input",
-            scale=np.pi,
-        )
-        builder.add_rotations(trainable=True, name="theta")
-        builder.add_superpositions(depth=1, trainable=True)
-
-        self.quantum = QuantumLayer(
-            input_size=n_q_features,
-            builder=builder,
-            n_photons=latent_n_photons,
-            measurement_strategy=MeasurementStrategy.MODE_EXPECTATIONS,
-        )
-
-        q_out_dim = self.quantum.output_size
-        in_dim_head = n_features + q_out_dim  # classical + quantum features
-
-        layers = []
-        prev = in_dim_head
-        for h in hidden_sizes:
-            layers.append(nn.Linear(prev, h))
-            layers.append(nn.ReLU())
-            prev = h
-        layers.append(nn.Linear(prev, target_dim))
-        self.head = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (batch, n_features) scaled classical features
-        """
-        x_q = x[:, :self.n_q_features]  # (batch, n_q_features)
-        q_feats = self.quantum(x_q)     # (batch, q_out_dim)
-        x_cat = torch.cat([x, q_feats], dim=1)
-        return self.head(x_cat)
+# Number of features we actually feed into the quantum layer
+N_Q_FEATURES = 6  # small, stable quantum core; classical head expands to 224 dims
 
 
-# ---------------------------------------------------------------------------
-# Training / evaluation utilities
-# ---------------------------------------------------------------------------
+# -------------------------
+# Utility functions
+# -------------------------
 
 def set_seed(seed: int = 42):
+    import random
+    random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
 
-def train_epoch(model, loader, optimizer, device):
-    model.train()
-    total_loss = 0.0
-    n_samples = 0
-    for xb, yb in loader:
-        xb = xb.to(device)
-        yb = yb.to(device)
-
-        optimizer.zero_grad()
-        pred = model(xb)
-        loss = F.mse_loss(pred, yb)
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item() * xb.size(0)
-        n_samples += xb.size(0)
-
-    return total_loss / max(n_samples, 1)
+def train_val_split_time_series(X, y, dates, test_size=0.2):
+    """Simple chronological split (no shuffling)."""
+    n = len(X)
+    split_idx = int(n * (1 - test_size))
+    X_train, X_val = X[:split_idx], X[split_idx:]
+    y_train, y_val = y[:split_idx], y[split_idx:]
+    dates_train, dates_val = dates[:split_idx], dates[split_idx:]
+    return X_train, X_val, y_train, y_val, dates_train, dates_val
 
 
-def eval_epoch(model, loader, device):
-    model.eval()
-    total_loss = 0.0
-    n_samples = 0
-    preds_list = []
-    targets_list = []
-
-    with torch.no_grad():
-        for xb, yb in loader:
-            xb = xb.to(device)
-            yb = yb.to(device)
-
-            pred = model(xb)
-            loss = F.mse_loss(pred, yb)
-            total_loss += loss.item() * xb.size(0)
-            n_samples += xb.size(0)
-
-            preds_list.append(pred.cpu().numpy())
-            targets_list.append(yb.cpu().numpy())
-
-    avg_loss = total_loss / max(n_samples, 1)
-    preds = np.concatenate(preds_list, axis=0)
-    targets = np.concatenate(targets_list, axis=0)
-
-    rmse = float(np.sqrt(mean_squared_error(targets, preds)))
-    mae = float(mean_absolute_error(targets, preds))
-    r2 = float(r2_score(targets, preds))
-
-    return avg_loss, rmse, mae, r2
+def compute_metrics(y_true, y_pred):
+    """Flatten everything and compute global RMSE/MAE/R2."""
+    y_true = y_true.reshape(-1)
+    y_pred = y_pred.reshape(-1)
+    rmse = math.sqrt(mean_squared_error(y_true, y_pred))
+    mae = mean_absolute_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred)
+    return rmse, mae, r2
 
 
-# ---------------------------------------------------------------------------
-# Main pipeline
-# ---------------------------------------------------------------------------
+# -------------------------
+# Data loading: engineered dataset
+# -------------------------
 
-def main():
-    set_seed(42)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+def load_crafted_dataset():
+    """
+    Load the engineered / normalized feature file and build
+    (X_t, y_{t+1}) pairs on the first 224 columns = normalized surface.
+    """
+    print(f"Loading engineered dataset from: {NORMALIZED_FEATURES_PATH}")
+    df = pd.read_csv(NORMALIZED_FEATURES_PATH)
 
-    # ----------------------------
-    # 1. Load data
-    # ----------------------------
-    root = Path(__file__).resolve().parents[1]
-    data_path = root / "data" / "Track2_QML" / "train.xlsx"
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"])
+        dates_all = df["Date"].values
+        feat_df = df.drop(columns=["Date"])
+    else:
+        feat_df = df.copy()
+        dates_all = None
 
-    print(f"Loading data from: {data_path}")
-    df = load_swaptions_data(str(data_path))
-    feature_cols = get_feature_columns(df)
+    # Use first 224 columns as normalized swaption surface
+    surface_cols = feat_df.columns[:224]
+    print(f"Using {len(surface_cols)} columns as normalized surface.")
+    surf = feat_df[surface_cols].values  # (N, 224)
 
-    X_df, y_df = prepare_dataset_data(df, feature_cols=feature_cols)
-    assert X_df.shape == y_df.shape
+    # Build 1-step ahead pairs: surf_t -> surf_{t+1}
+    X_all_full = surf[:-1]   # full 224-dim surface used for forecasting
+    y_all = surf[1:]
 
-    n_samples, n_features = X_df.shape
-    target_dim = n_features
-    print(f"Dataset shape: X={X_df.shape}, y={y_df.shape}")
+    if dates_all is not None:
+        dates = dates_all[1:]
+    else:
+        raw = pd.read_excel(RAW_TRAIN_PATH)
+        raw["Date"] = pd.to_datetime(raw["Date"])
+        raw = raw.sort_values("Date").reset_index(drop=True)
+        dates = raw["Date"].values[-len(y_all):]
 
-    # ----------------------------
-    # 2. Train / validation split (time ordered)
-    # ----------------------------
-    split_idx = int(n_samples * 0.8)
-    X_train_df = X_df.iloc[:split_idx].reset_index(drop=True)
-    y_train_df = y_df.iloc[:split_idx].reset_index(drop=True)
-    X_val_df = X_df.iloc[split_idx:].reset_index(drop=True)
-    y_val_df = y_df.iloc[split_idx:].reset_index(drop=True)
+    print(f"Dataset shape: X={X_all_full.shape}, y={y_all.shape}")
+    return X_all_full, y_all, dates
 
-    print(f"Train samples: {len(X_train_df)}  |  Val samples: {len(X_val_df)}")
 
-    # ----------------------------
-    # 3. Scaling (inputs only)
-    # ----------------------------
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train_df.values.astype(np.float32))
-    X_val_scaled = scaler.transform(X_val_df.values.astype(np.float32))
+# -------------------------
+# Hybrid QML model
+# -------------------------
 
-    y_train = y_train_df.values.astype(np.float32)
-    y_val = y_val_df.values.astype(np.float32)
+class HybridQMLRegressor(nn.Module):
+    """
+    Hybrid model:
+      - Inputs to quantum core: first N_Q_FEATURES of normalized surface
+      - Quantum core: MerLin QuantumLayer over these features
+      - Classical head: maps quantum features -> 224-dim surface
+    """
 
-    # ----------------------------
-    # 4. Build model
-    # ----------------------------
-    n_q_features = 6  # how many surface points we feed to the quantum layer
-    model = QuantumHybridForecast(
-        n_features=n_features,
-        target_dim=target_dim,
-        n_q_features=n_q_features,
-        latent_n_photons=3,
-        hidden_sizes=(256, 256),
-    ).to(device)
+    def __init__(
+        self,
+        n_q_features: int,
+        target_dim: int,
+        n_photons: int = 3,
+        n_modes: int = 6,
+        hidden_dim: int = 128,
+    ):
+        super().__init__()
 
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Hybrid QML model parameters: {n_params}")
+        n_modes = max(n_modes, n_q_features)
 
-    # ----------------------------
-    # 5. DataLoaders
-    # ----------------------------
-    batch_size = 64
+        builder = CircuitBuilder(n_modes=n_modes)
+        builder.add_entangling_layer(trainable=True, name="U1")
+        builder.add_angle_encoding(
+            modes=list(range(n_q_features)),  # one mode per encoded feature
+            name="input",
+            scale=np.pi,
+        )
+        builder.add_rotations(trainable=True, name="theta")
+        builder.add_superpositions(depth=1, trainable=True)
 
-    train_ds = torch.utils.data.TensorDataset(
-        torch.from_numpy(X_train_scaled), torch.from_numpy(y_train)
-    )
-    val_ds = torch.utils.data.TensorDataset(
-        torch.from_numpy(X_val_scaled), torch.from_numpy(y_val)
-    )
+        self.quantum_core = QuantumLayer(
+            input_size=n_q_features,  # <-- must match encoded features (N_Q_FEATURES)
+            builder=builder,
+            n_photons=n_photons,
+            measurement_strategy=MeasurementStrategy.PROBABILITIES,
+        )
 
-    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+        self.head = nn.Sequential(
+            nn.Linear(self.quantum_core.output_size, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, target_dim),
+        )
 
-    # ----------------------------
-    # 6. Training loop
-    # ----------------------------
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    n_epochs = 30
+    def forward(self, x_q):
+        """
+        x_q: (..., n_q_features) tensor (already sliced from full surface).
+        """
+        q_out = self.quantum_core(x_q)
+        out = self.head(q_out)
+        return out
 
-    best_val_loss = float("inf")
+
+# -------------------------
+# Training loop
+# -------------------------
+
+def train_hybrid_qml(
+    model,
+    X_train_q,
+    y_train,
+    X_val_q,
+    y_val,
+    n_epochs: int = 30,
+    lr: float = 1e-3,
+):
+    model.to(DEVICE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    X_train_t = torch.tensor(X_train_q, dtype=torch.float32, device=DEVICE)
+    y_train_t = torch.tensor(y_train, dtype=torch.float32, device=DEVICE)
+    X_val_t = torch.tensor(X_val_q, dtype=torch.float32, device=DEVICE)
+    y_val_t = torch.tensor(y_val, dtype=torch.float32, device=DEVICE)
+
+    best_val_rmse = float("inf")
     best_state = None
 
     for epoch in range(1, n_epochs + 1):
-        train_loss = train_epoch(model, train_loader, optimizer, device)
-        val_loss, rmse, mae, r2 = eval_epoch(model, val_loader, device)
+        model.train()
+        optimizer.zero_grad()
+
+        y_pred = model(X_train_t)
+        loss = F.mse_loss(y_pred, y_train_t)
+        loss.backward()
+        optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            y_val_pred = model(X_val_t).cpu().numpy()
+            y_val_true = y_val_t.cpu().numpy()
+            rmse, mae, r2 = compute_metrics(y_val_true, y_val_pred)
 
         print(
             f"Epoch {epoch:03d} | "
-            f"train_loss={train_loss:.6f} | "
-            f"val_loss={val_loss:.6f} | "
+            f"train_loss={loss.item():.6f} | "
+            f"val_loss={rmse**2:.6f} | "
             f"RMSE={rmse:.6f} | MAE={mae:.6f} | R2={r2:.6f}"
         )
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if rmse < best_val_rmse:
+            best_val_rmse = rmse
             best_state = model.state_dict()
 
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    # Final metrics
-    val_loss, rmse, mae, r2 = eval_epoch(model, val_loader, device)
-    print("\nValidation metrics (1-step ahead hybrid QML):")
+    return model
+
+
+# -------------------------
+# 14-day autoregressive forecast (normalized space)
+# -------------------------
+
+def forecast_14_days(model, last_surface_full, last_date, clip_min, clip_max, n_q_features: int):
+    """
+    Generate a 14-day trajectory in normalized space.
+      - At each step, feed the first n_q_features of the current surface
+        into the quantum core.
+      - Predict a full 224-dim surface.
+    """
+    model.eval()
+    current_surface = last_surface_full.copy()
+
+    dates = []
+    surfaces = []
+
+    for step in range(FORECAST_HORIZON_DAYS):
+        x_q = current_surface[:n_q_features].reshape(1, -1)
+        x_q_t = torch.tensor(x_q, dtype=torch.float32, device=DEVICE)
+
+        with torch.no_grad():
+            next_surface = model(x_q_t).cpu().numpy().reshape(-1)
+
+        # Clip to training range to avoid explosions
+        next_surface = np.clip(next_surface, clip_min, clip_max)
+
+        next_date = last_date + timedelta(days=step + 1)
+        dates.append(next_date)
+        surfaces.append(next_surface.copy())
+
+        current_surface = next_surface
+
+    surfaces = np.stack(surfaces, axis=0)
+    df_forecast = pd.DataFrame(
+        surfaces,
+        columns=[f"TenorSurface_{i}" for i in range(surfaces.shape[1])],
+    )
+    df_forecast.insert(0, "Date", dates)
+    return df_forecast
+
+
+# -------------------------
+# Main
+# -------------------------
+
+def main():
+    set_seed(SEED)
+
+    # 1) Load engineered dataset (full 224-dim surfaces)
+    X_all_full, y_all, dates_all = load_crafted_dataset()
+
+    # Quantum input: first N_Q_FEATURES from surface_t
+    X_all_q = X_all_full[:, :N_Q_FEATURES]
+
+    # Time-series split
+    X_train_q, X_val_q, y_train, y_val, dates_train, dates_val = train_val_split_time_series(
+        X_all_q, y_all, dates_all, test_size=TEST_SIZE
+    )
+
+    print(f"Train samples: {len(X_train_q)}  |  Val samples: {len(X_val_q)}")
+
+    n_q_features = X_train_q.shape[1]
+    target_dim = y_train.shape[1]  # 224
+
+    # 2) Build hybrid QML model
+    model = HybridQMLRegressor(
+        n_q_features=n_q_features,
+        target_dim=target_dim,
+        n_photons=3,
+        n_modes=6,
+        hidden_dim=128,
+    )
+
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Hybrid QML model parameters: {total_params}")
+
+    # 3) Train
+    model = train_hybrid_qml(
+        model,
+        X_train_q,
+        y_train,
+        X_val_q,
+        y_val,
+        n_epochs=30,
+        lr=1e-3,
+    )
+
+    # Final validation metrics
+    model.eval()
+    with torch.no_grad():
+        X_val_t = torch.tensor(X_val_q, dtype=torch.float32, device=DEVICE)
+        y_val_t = torch.tensor(y_val, dtype=torch.float32, device=DEVICE)
+        y_val_pred = model(X_val_t).cpu().numpy()
+        y_val_true = y_val_t.cpu().numpy()
+        rmse, mae, r2 = compute_metrics(y_val_true, y_val_pred)
+
+    print("\nValidation metrics (1-step ahead hybrid QML, engineered data):")
     print(f"  RMSE: {rmse:.6f}")
     print(f"  MAE:  {mae:.6f}")
     print(f"  R2:   {r2:.6f}")
 
-    # ----------------------------
-    # 7. 14-day autoregressive forecast
-    # ----------------------------
+    # 4) 14-day forecast (autoregressive, normalized)
     print("\nGenerating 14-day autoregressive QML forecast...")
 
-    # Use the *last* row of X_df as starting context (original scale)
-    last_context = X_df.iloc[[-1]].values.astype(np.float32)  # shape (1, n_features)
-    last_date = df["Date"].iloc[-1]
+    last_surface_full = X_all_full[-1]  # last 224-dim normalized surface
+    last_date = pd.to_datetime(dates_all[-1])
 
-    future_rows = []
-    future_dates = []
+    # Use training targets to set clipping range
+    clip_min = float(y_train.min())
+    clip_max = float(y_train.max())
 
-    model.eval()
-    with torch.no_grad():
-        current_context = last_context.copy()
+    df_forecast = forecast_14_days(
+        model,
+        last_surface_full,
+        last_date,
+        clip_min=clip_min,
+        clip_max=clip_max,
+        n_q_features=n_q_features,
+    )
 
-        for step in range(1, 15):  # 1..14
-            # Scale current context for input
-            x_scaled = scaler.transform(current_context)  # (1, n_features)
-            x_tensor = torch.from_numpy(x_scaled).to(device)
+    out_path = os.path.join(DATA_DIR, "qml_merlin_14day_forecast_engineered.csv")
+    df_forecast.to_csv(out_path, index=False)
 
-            # Predict next-day surface (original scale)
-            y_pred = model(x_tensor).cpu().numpy()[0]  # (target_dim,)
-
-            future_date = last_date + timedelta(days=step)
-            future_dates.append(future_date)
-            future_rows.append(y_pred)
-
-            # For autoregressive roll-out, treat prediction as next context
-            current_context = y_pred.reshape(1, -1).astype(np.float32)
-
-    forecast_array = np.stack(future_rows, axis=0)  # (14, 224)
-    forecast_df = pd.DataFrame(forecast_array, columns=feature_cols)
-    forecast_df.insert(0, "Date", pd.to_datetime(future_dates))
-
-    out_path = root / "data" / "Track2_QML" / "qml_merlin_14day_forecast.csv"
-    forecast_df.to_csv(out_path, index=False)
-
-    print("\n14-day QML forecast preview:")
-    print(forecast_df.head())
+    print("\n14-day QML forecast (engineered features) preview:")
+    print(df_forecast.head())
     print(f"\nSaved 14-day QML forecast to: {out_path}")
 
 
