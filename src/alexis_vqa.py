@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import pandas as pd
 import torch
@@ -9,11 +10,14 @@ from qiskit import QuantumCircuit
 from qiskit.circuit import Parameter
 from qiskit.quantum_info import Statevector, SparsePauliOp
 
-
 # ============================================================
 # 0. LOAD XLSX + remove first column
 # ============================================================
-raw = pd.read_excel("./data/Track2_QML/xlsx/train.xlsx").values
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TRAIN_PATH = os.path.join(BASE_DIR, "..", "data", "Track2_QML", "xlsx", "train.xlsx")
+
+raw = pd.read_excel(TRAIN_PATH).values
 dataset_train = raw[:, 1:]
 
 
