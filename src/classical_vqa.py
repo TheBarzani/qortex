@@ -4,18 +4,16 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.decomposition import PCA
+import os
 
 # ============================================================
 # 0. LOAD XLSX + remove first column
 # ============================================================
-import os
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TRAIN_PATH = os.path.join(BASE_DIR, "..", "data", "Track2_QML", "xlsx", "train.xlsx")
 
 raw = pd.read_excel(TRAIN_PATH).values
-dataset_train = raw[:, 1:]
-
+dataset_train = raw[:, 1:]   # drop Date
 
 
 # ============================================================
@@ -28,7 +26,7 @@ def compute_pca(data):
 
 
 # ============================================================
-# 2. Windows
+# 2. Windows (3 → 3)
 # ============================================================
 def make_windows(data2):
     X, Y = [], []
@@ -51,55 +49,52 @@ class TimeDataset(Dataset):
 
 
 # ============================================================
-# 4. Tiny classical “feature” layer (24 params total)
+# 4. Classical feature map (24 params)
 # ============================================================
 class ClassicalObsLayer(nn.Module):
     """
-    Classical analogue of QiskitObsLayer.
-
-    - n = 6 features (flattened 3x2 window)
-    - reps = 4 “layers”
-    - trainable parameters: theta of shape (reps, n) = 24 scalars
+    Analogue of QiskitObsLayer:
+    - n = 6 input features
+    - reps = 4 layers
+    - 24 trainable parameters (reps * n)
     """
     def __init__(self, n=6, reps=4):
         super().__init__()
         self.n = n
         self.reps = reps
 
-        # 24 trainable parameters, like the quantum thetas
+        # 24 trainable parameters
         self.theta = nn.Parameter(0.01 * torch.randn(reps, n))
 
     def forward(self, x):
-        # x: (B, 3, 2) -> (B, 6)
-        x_flat = x.view(-1, self.n)        # (B, 6)
+        # x: (B, 3, 2) → flatten → (B, 6)
+        x_flat = x.view(-1, self.n)
 
-        # Broadcast: (B, reps, n)
-        # Use a simple nonlinear mixing that vaguely plays the role of
-        # "encoding + entangling + measurement"
-        phase = x_flat.unsqueeze(1) * self.theta.unsqueeze(0)  # (B, reps, n)
+        # (B, reps, n)
+        phase = x_flat.unsqueeze(1) * self.theta.unsqueeze(0)
 
-        # Nonlinearity + aggregation over reps
-        # (you can swap tanh for sin/cos if you want)
-        out = torch.mean(torch.tanh(phase), dim=1)  # (B, n)
-
-        return out                                # (B, 6)
+        # Nonlinear mixing and collapse reps dimension
+        out = torch.mean(torch.tanh(phase), dim=1)   # (B, 6)
+        return out
 
 
 # ============================================================
-# 5. Full model (no extra trainable params beyond 24)
+# 5. Full model: 24 (Obs) + 42 (Linear 6→6) = 66 params
 # ============================================================
 class ClassicalModel(nn.Module):
     def __init__(self, n=6, reps=4):
         super().__init__()
-        self.q = ClassicalObsLayer(n=n, reps=reps)   # 24 params
+        self.q = ClassicalObsLayer(n=n, reps=reps)  # 24 params
+        self.fc = nn.Linear(n, n)                   # 42 params → total 66
 
     def forward(self, x):
-        q_out = self.q(x)           # (B, 6)
-        return q_out.view(-1, 3, 2) # match target shape
+        q_out = self.q(x)      # (B, 6)
+        y = self.fc(q_out)     # (B, 6)
+        return y.view(-1, 3, 2)
 
 
 # ============================================================
-# 6. Training (same as before, just swap Model -> ClassicalModel)
+# 6. Training loop
 # ============================================================
 def train_model(dataset_train, epochs=20, bs=16):
     data2, pca = compute_pca(dataset_train)
@@ -111,9 +106,9 @@ def train_model(dataset_train, epochs=20, bs=16):
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     loss_fn = nn.MSELoss()
 
-    # sanity check: should print 24
+    # print number of trainable parameters
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print("Trainable parameters:", n_params)
+    print("Trainable parameters (should be 66):", n_params)
 
     for epoch in range(epochs):
         total = 0.0
@@ -127,13 +122,13 @@ def train_model(dataset_train, epochs=20, bs=16):
 
             total += loss.item()
 
-        print("epoch", epoch, "loss", total / len(loader))
+        print(f"epoch {epoch} loss {total / len(loader)}")
 
     return model, pca
 
 
 # ============================================================
-# 7. Autoregressive generation (same logic)
+# 7. Autoregressive generation (3 → 3 → ...)
 # ============================================================
 def generate_next(model, pca, dataset_train, steps=2):
     last3 = dataset_train[-3:]
@@ -152,7 +147,7 @@ def generate_next(model, pca, dataset_train, steps=2):
 
 
 # ============================================================
-# TRAIN + GENERATE
+# RUN
 # ============================================================
 if __name__ == "__main__":
     model, pca = train_model(dataset_train)
