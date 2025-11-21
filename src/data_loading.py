@@ -5,9 +5,15 @@ Extracted from DataLoading_Visualization_example.ipynb
 
 from pathlib import Path
 import os
+import warnings
 import pandas as pd
 import numpy as np
 import torch
+
+# Suppress pandas performance warnings
+pd.options.mode.chained_assignment = None
+warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 
 def load_swaptions_data(data_path: str) -> pd.DataFrame:
@@ -124,8 +130,127 @@ def surface_for_date(df: pd.DataFrame, idx: int,
     return surface
 
 
+# Creating features from the surface
+def create_technical_features(X):
+    """
+    Create additional features from the swaption surface data (X).
+    
+    Assumes the DataFrame X contains a column named 'date' with datetime objects.
+    These features capture the shape and dynamics of the volatility surface.
+    """
+    X_enhanced = X.copy()
+    # print(X_enhanced.columns)
+    # Ensure the 'date' column is in datetime format and is present
+    if 'Date' not in X_enhanced.columns:
+        raise ValueError("DataFrame X must contain a column named 'date'.")
+        
+    # Convert to datetime objects if they aren't already (important for .dt accessor)
+    dates = pd.to_datetime(X_enhanced['Date'])
+
+    # 1. Time features
+    # Access the date components directly from the 'date' column
+    X_enhanced['day_of_week'] = dates.dt.dayofweek
+    X_enhanced['month'] = dates.dt.month
+    X_enhanced['quarter'] = dates.dt.quarter
+    # print(X_enhanced.columns)
+    # print(X_enhanced.head(1))
+    # Remove the original 'date' column if it's not needed for the model
+    # (Optional, comment out if you need to keep it)
+    
+    # print(X_enhanced.columns)
+    # print(X_enhanced.head(1))
+    
+    X_enhanced2 = X.copy()
+    X_enhanced2 = X_enhanced2.drop(columns=['Date'])
+    # print(X_enhanced2.columns)
+    # print(X_enhanced2.head(1))
+        # 2. Surface statistics (across all points)
+    X_enhanced2['surface_mean'] = X_enhanced2.mean(axis=1)
+    X_enhanced2['surface_std'] = X_enhanced2.std(axis=1)
+    X_enhanced2['surface_skew'] = X_enhanced2.skew(axis=1)
+    X_enhanced2['surface_kurt'] = X_enhanced2.kurtosis(axis=1)
+    
+    # 3. Rolling statistics (looking back)
+    window = 5
+    X_enhanced2['surface_mean_ma5'] = X_enhanced2['surface_mean'].rolling(window).mean()
+    X_enhanced2['surface_volatility'] = X_enhanced2['surface_mean'].rolling(window).std()
+    
+    # 4. Changes from previous day
+    # for col in X.columns[:10]:  # First 10 key points
+    #     X_enhanced2[f'{col}_change'] = X[col].diff()
+
+    X_result = pd.concat([X_enhanced, X_enhanced2], axis=1)
+    return X_result
+
+
+def create_lagged_features(df, feature_cols, lags=[1, 2, 3, 5, 10]):
+    """
+    Create lagged features to capture temporal dependencies.
+    
+    This adds historical values as features, which can be very powerful
+    for time series prediction.
+    """
+    df_lagged = df[feature_cols].copy()
+    
+    for lag in lags:
+        for col in feature_cols:
+            # Ensure we get a Series, not a DataFrame
+            if col not in df.columns:
+                print(f"Warning: Column '{col}' not found in DataFrame, skipping...")
+                continue
+            
+            # Get the column as a Series explicitly
+            col_data = df[col]
+            if isinstance(col_data, pd.DataFrame):
+                # If it's a DataFrame (shouldn't happen, but handle it), take first column
+                col_data = col_data.iloc[:, 0]
+            
+            # Shift and assign
+            df_lagged[f'{col}_lag{lag}'] = col_data.shift(lag)
+    
+    # Drop rows with NaN (from lagging)
+    df_lagged = df_lagged.dropna()
+    
+    return df_lagged
+
+
+def normalize_features(df, cols):
+    """
+    Normalize features in the DataFrame.
+    """
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    df[cols] = scaler.fit_transform(df[cols])
+    return df
 
 if __name__ == "__main__":
     data_path = "../data/Track2_QML/train.xlsx"
     df = load_swaptions_data(data_path)
-    print(df.head())
+    # print(df.head())
+
+
+
+    #FEATURES CREATION
+    # Apply feature creation functions on the loaded dataframe
+    feature_cols = get_feature_columns(df)
+
+    # Create technical features (this will produce engineered features from the raw inputs)
+    df_features = create_technical_features(df)
+    print(df_features.shape, "features shape")
+    # Optionally, create lagged features if desired:
+    lag_cols = df_features.columns.to_list()[1:225] #only the tenor and maturity columns
+    df_features_lagged = create_lagged_features(df_features, lag_cols, lags=[1])
+    # Make a new copy containing the enhanced dataset with features
+
+    df_all_features = pd.concat([df_features, df_features_lagged], axis=1)
+    print(df_all_features.shape, "all features shape")
+
+    # print(df_all_features.columns.tolist()[224: 250])
+
+    # #NORMALIZATION
+    df_normalized = normalize_features(df_all_features, ["day_of_week", "month", "quarter"])
+    print(df_normalized.shape, "normalized shape")
+    print(df_normalized[["day_of_week", "month", "quarter"]].head(1))
+
+    
+    # print(df_normalized.columns.tolist()[224: 250])
