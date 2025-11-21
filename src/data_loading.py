@@ -214,6 +214,67 @@ def create_lagged_features(df, feature_cols, lags=[1, 2, 3, 5, 10]):
     return df_lagged
 
 
+# Seasonal decomposition feature creation (additive decomposition)
+def create_seasonal_decomposition_features(df, feature_cols, period=7, model='additive'):
+    """
+    Adds seasonal decomposition statistics (trend, seasonal, resid) for each feature column.
+    
+    Args:
+        df: DataFrame, must be sorted in time.
+        feature_cols: List of columns to decompose.
+        period: Period for decomposition (7 ~ weekly for daily fin data).
+        model: 'additive' or 'multiplicative'
+    Returns:
+        DataFrame with new columns for each component per feature col.
+    """
+    from statsmodels.tsa.seasonal import seasonal_decompose
+
+    df_result = df.copy()
+    df_result = df_result.dropna()
+    
+    for col in feature_cols:
+        if col not in df_result.columns:
+            print(f"Warning: Column '{col}' not found in DataFrame, skipping...")
+            continue
+        
+        try:
+            # Get the series for decomposition
+            series = df_result[col].copy()
+            
+            # Ensure we have enough data points for decomposition
+            if len(series) < 2 * period:
+                print(f"Warning: Not enough data points for column '{col}' (need at least {2*period}, have {len(series)}), skipping...")
+                continue
+            
+            # Perform decomposition - pass Series directly
+            decomposition = seasonal_decompose(series, model=model, period=period, extrapolate_trend="freq")
+            
+            # Extract components - ensure they are Series/arrays, not strings
+            trend = decomposition.trend
+            seasonal = decomposition.seasonal
+            resid = decomposition.resid
+            
+            # Convert to numpy arrays to avoid index issues, then create Series with correct index
+            trend_values = np.array(trend) if hasattr(trend, '__array__') else trend
+            seasonal_values = np.array(seasonal) if hasattr(seasonal, '__array__') else seasonal
+            resid_values = np.array(resid) if hasattr(resid, '__array__') else resid
+            
+            # Create Series with the DataFrame's index
+            df_result[f'{col}_trend'] = pd.Series(trend_values, index=df_result.index, dtype=float)
+            df_result[f'{col}_seasonal'] = pd.Series(seasonal_values, index=df_result.index, dtype=float)
+            df_result[f'{col}_resid'] = pd.Series(resid_values, index=df_result.index, dtype=float)
+            
+        except Exception as e:
+            print(f"Error decomposing column '{col}': {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    return df_result
+
+
+
+
 def normalize_features(df, cols):
     """
     Normalize features in the DataFrame.
@@ -224,11 +285,11 @@ def normalize_features(df, cols):
     return df
 
 if __name__ == "__main__":
-    data_path = "data/Track2_QML/train.xlsx"
-    df = load_swaptions_data(data_path)
+    data_dir_path = "../data/Track2_QML/"
+    data_file_name = "train.xlsx"
+    data_path = os.path.join(data_dir_path, data_file_name)
+    df = load_swaptions_data(str(data_path))
     # print(df.head())
-
-
 
     #FEATURES CREATION
     # Apply feature creation functions on the loaded dataframe
@@ -238,19 +299,31 @@ if __name__ == "__main__":
     df_features = create_technical_features(df)
     print(df_features.shape, "features shape")
     # Optionally, create lagged features if desired:
-    lag_cols = df_features.columns.to_list()[1:225] #only the tenor and maturity columns
-    df_features_lagged = create_lagged_features(df_features, lag_cols, lags=[1])
+    lag_input_cols = df_features.columns.to_list()[1:225] #only the tenor and maturity columns
+    df_features_lagged = create_lagged_features(df_features, lag_input_cols, lags=[1, 3, 5, 7])
     # Make a new copy containing the enhanced dataset with features
 
     df_all_features = pd.concat([df_features, df_features_lagged], axis=1)
     print(df_all_features.shape, "all features shape")
 
     # print(df_all_features.columns.tolist()[224: 250])
+    # NOT WORKING
+    # df_seasonal_features = create_seasonal_decomposition_features(df_all_features, lag_input_cols, period=7, model='additive')
+    # print(df_seasonal_features.shape, "seasonal features shape")
+    # print('_trend' in df_seasonal_features.columns.tolist())
+    # print('_seasonal' in df_seasonal_features.columns.tolist())
+    # print('_resid' in df_seasonal_features.columns.tolist())
 
-    # #NORMALIZATION
-    df_normalized = normalize_features(df_all_features, ["day_of_week", "month", "quarter"])
-    print(df_normalized.shape, "normalized shape")
-    print(df_normalized[["day_of_week", "month", "quarter"]].head(1))
 
-    
-    # print(df_normalized.columns.tolist()[224: 250])
+
+    # # #NORMALIZATION
+    # df_normalized = normalize_features(df_all_features, ["day_of_week", "month", "quarter"])
+    # print(df_normalized.shape, "normalized shape")
+    # print(df_normalized[["day_of_week", "month", "quarter"]].head(1))
+
+    # # print("null check", any(df_normalized.isnull().sum()), df_normalized.shape)
+    # df_normalized = df_normalized.dropna()
+    # print("null check after dropna", any(df_normalized.isnull().sum()), df_normalized.shape)
+
+    # df_normalized.to_csv(str(data_dir_path + "df_normalized_lags4.csv"), index=False)
+    # print(f"Saved normalized data to {data_dir_path + 'df_normalized_lags4.csv'}")
