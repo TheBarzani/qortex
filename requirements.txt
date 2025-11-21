@@ -1,0 +1,16 @@
+# Data and ML
+numpy
+torch
+matplotlib
+pandas
+
+# Quantum computing packages
+merlinquantum
+perceval-quandela
+qiskit
+qiskit-aer
+
+# Jupyter support
+jupyter
+ipykernel
+notebook
