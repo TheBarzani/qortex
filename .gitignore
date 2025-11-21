@@ -212,3 +212,9 @@ __marimo__/
 
 # Mac stuff
 .DS_Store
+*/.DS_Store
+
+# Excel temporary files
+~$*.xls*
+~$*.xlsx
+.~lock.*
