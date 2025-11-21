@@ -214,7 +214,3 @@ __marimo__/
 ~$*.xls*
 ~$*.xlsx
 .~lock.*
-
-# Word temporary files
-~$*.doc*
-~$*.docx
