@@ -27,7 +27,7 @@ def compute_pca(data):
 
 
 # ============================================================
-# 2. Windows
+# 2. Windows t1–t3 → t4–t6
 # ============================================================
 def make_windows(data2):
     X, Y = [], []
@@ -50,35 +50,39 @@ class TimeDataset(Dataset):
 
 
 # ============================================================
-# 4. Parametric circuit
+# 4. NEW PARAMETRIC CIRCUIT — exactly as you want
 # ============================================================
 def make_feature_circuit(n=6, reps=4):
     qc = QuantumCircuit(n)
-    data_params, theta_params = [], []
+
+    # ---- 1) ENCODAGE DATA (UNE SEULE FOIS) ----
+    data_params = []
+    for q in range(n):
+        p = Parameter(f"data_{q}")
+        qc.ry(p, q)
+        data_params.append(p)
+
+    # ---- 2) BLOCS THETA + CASCADE CZ ----
+    theta_params = []
 
     for r in range(reps):
-        row_d = []
-        for q in range(n):
-            p = Parameter(f"data_{r}_{q}")
-            qc.ry(p, q)
-            row_d.append(p)
-        data_params.append(row_d)
-
-        for q in range(n - 1):
-            qc.cz(q, q + 1)
-
-        row_t = []
+        row = []
+        # couche RY(theta)
         for q in range(n):
             t = Parameter(f"theta_{r}_{q}")
             qc.ry(t, q)
-            row_t.append(t)
-        theta_params.append(row_t)
+            row.append(t)
+        theta_params.append(row)
+
+        # cascade CZ
+        for q in range(n - 1):
+            qc.cz(q, q + 1)
 
     return qc, data_params, theta_params
 
 
 # ============================================================
-# 5. Quantum layer (<Z_i>)
+# 5. Quantum layer <Z_i>
 # ============================================================
 class QiskitObsLayer(nn.Module):
     def __init__(self, n=6, reps=4):
@@ -99,15 +103,16 @@ class QiskitObsLayer(nn.Module):
         out = []
 
         for b in range(B):
+            # x[b] = (3,2) → flatten to 6 angles, encoded ONCE
             angles = x[b].reshape(6).tolist()
 
             assign = {}
-            k = 0
-            for r in range(self.reps):
-                for q in range(self.n):
-                    assign[self.data_params[r][q]] = float(angles[k % 6])
-                    k += 1
 
+            # data encoding
+            for q in range(self.n):
+                assign[self.data_params[q]] = float(angles[q])
+
+            # theta blocks
             for r in range(self.reps):
                 for q in range(self.n):
                     assign[self.theta_params[r][q]] = float(self.theta[r, q].detach())
@@ -115,7 +120,10 @@ class QiskitObsLayer(nn.Module):
             circ = self.template.assign_parameters(assign)
             state = Statevector.from_instruction(circ)
 
-            vals = [float(state.expectation_value(o).real) for o in self.obs]
+            vals = []
+            for obs in self.obs:
+                vals.append(float(state.expectation_value(obs).real))
+
             out.append(vals)
 
         return torch.tensor(out, dtype=torch.float32)
@@ -138,7 +146,7 @@ class Model(nn.Module):
 # ============================================================
 # 7. Training
 # ============================================================
-def train_model(dataset_train, epochs=20, bs=16):
+def train_model(dataset_train, epochs=20, bs=8):
     data2, pca = compute_pca(dataset_train)
     X, Y = make_windows(data2)
 
@@ -149,7 +157,7 @@ def train_model(dataset_train, epochs=20, bs=16):
     loss_fn = nn.MSELoss()
 
     for epoch in range(epochs):
-        total = 0
+        tot = 0
         for xb, yb in loader:
             pred = model(xb)
             loss = loss_fn(pred, yb)
@@ -158,15 +166,14 @@ def train_model(dataset_train, epochs=20, bs=16):
             loss.backward()
             opt.step()
 
-            total += loss.item()
-
-        print("epoch", epoch, "loss", total / len(loader))
+            tot += loss.item()
+        print("epoch", epoch, "loss", tot/len(loader))
 
     return model, pca
 
 
 # ============================================================
-# 8. Autoregressive generation (3 -> 3 -> ...)
+# 8. Autoregressive prediction
 # ============================================================
 def generate_next(model, pca, dataset_train, steps=2):
     last3 = dataset_train[-3:]
@@ -176,23 +183,23 @@ def generate_next(model, pca, dataset_train, steps=2):
 
     for _ in range(steps):
         inp = torch.tensor(seq[-3:], dtype=torch.float32).unsqueeze(0)
-        pred = model(inp)[0].detach().numpy()
-        gen.append(pred)
-        seq = np.vstack([seq, pred])
+        out = model(inp)[0].detach().numpy()
+        gen.append(out)
+        seq = np.vstack([seq, out])
 
     gen = np.vstack(gen)
     return pca.inverse_transform(gen)
 
 
 # ============================================================
-# TRAIN + GENERATE
+# RUN TRAINING + GENERATION
 # ============================================================
 model, pca = train_model(dataset_train)
 future_points = generate_next(model, pca, dataset_train, steps=2)
 
 
 # ============================================================
-# 9. Build final dataset with Tenor/Maturity grid + Dates
+# 9. Build final dataset (Tenor/Maturity grid)
 # ============================================================
 tenors = [1,2,3,4,5,6,7,8,9,10,15,20,25,30]
 maturities = [0.0833333333333333, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 5, 7, 10, 15, 20, 25, 30]
