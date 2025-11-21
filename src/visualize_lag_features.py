@@ -485,21 +485,21 @@ if __name__ == "__main__":
     # ACF/PACF PLOTS FOR RAW TIME SERIES
     if STATSMODELS_AVAILABLE:
         # Plot ACF/PACF for the original column
-        plot_acf_pacf_from_dataframe(
-            df_normalized, 
-            original_col, 
-            lags=40, 
-            save_path=output_dir + "acf_pacf.png"
-        )
+        # plot_acf_pacf_from_dataframe(
+        #     df_normalized, 
+        #     original_col, 
+        #     lags=40, 
+        #     save_path=output_dir + "acf_pacf.png"
+        # )
         
         # Example: Plot ACF/PACF for multiple columns
-        # sample_cols = [original_col] + [df_normalized.columns[i] for i in range(1, min(4, len(df_normalized.columns)))]
-        # plot_multiple_acf_pacf(
-        #     df_normalized,
-        #     sample_cols[:3],  # Limit to 3 columns for readability
-        #     lags=30,
-        #     save_path=output_dir + "multiple_acf_pacf.png"
-        # )
+        sample_cols = df_normalized.columns.tolist()[10:14]
+        plot_multiple_acf_pacf(
+            df_normalized,
+            sample_cols,  # Limit to 3 columns for readability
+            lags=30,
+            save_path=output_dir + "multiple_acf_pacf.png"
+        )
     else:
         print("statsmodels not available. Skipping ACF/PACF plots.")
 
