@@ -3,6 +3,7 @@ numpy
 torch
 matplotlib
 pandas
+scikit-learn
 
 # Quantum computing packages
 merlinquantum
