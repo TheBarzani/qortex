@@ -4,6 +4,7 @@ torch
 matplotlib
 pandas
 scikit-learn
+xgboost
 seaborn
 openpyxl
 
