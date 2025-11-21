@@ -71,6 +71,13 @@ Implemented as an MLP:
     - Saves the trained generator to:
       - `data/Track2_QML/generator_classical.pt`
 
+- `sample_gan_14day.py`
+  - Uses the trained generator to **roll out a 14-day trajectory**:
+    - Start from the last real surface in `train.xlsx`.
+    - Iteratively generate day `t+1` conditioned on day `t`.
+    - Saves a CSV with dates and 224-dimensional surfaces:
+      - `data/Track2_QML/gan_14day_samples.csv`.
+
 ---
 
 ## Parameter Matching with Quantum Models
